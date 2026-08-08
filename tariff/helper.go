@@ -2,6 +2,7 @@ package tariff
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -29,12 +30,21 @@ func bo() backoff.BackOff {
 	)
 }
 
-// backoffPermanentError returns a permanent error in case of HTTP 400
+// backoffPermanentError returns a permanent error for client errors, which
+// retrying cannot fix. Server errors (5xx) are transient, and so are 404 and
+// 408 - a resource that is not there yet is normal for backends that publish
+// it dynamically, a Home Assistant entity whose template sensor has not
+// rendered after a restart being one example.
 func backoffPermanentError(err error) error {
 	if se, ok := errors.AsType[*request.StatusError](err); ok {
-		if code := se.StatusCode(); code >= 400 && code <= 599 {
+		if code := se.StatusCode(); code >= 400 && code < 500 &&
+			code != http.StatusNotFound && code != http.StatusRequestTimeout {
 			return backoff.Permanent(se)
 		}
+
+		// the request helpers wrap every non-2xx status in backoff.Permanent,
+		// so retryable ones have to be unwrapped for backoff to retry them
+		return se
 	}
 	if err != nil && strings.HasPrefix(err.Error(), "jq: query failed") {
 		return backoff.Permanent(err)

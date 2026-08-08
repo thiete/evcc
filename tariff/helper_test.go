@@ -2,13 +2,16 @@ package tariff
 
 import (
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/benbjohnson/clock"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/evcc-io/evcc/api"
 	"github.com/evcc-io/evcc/util"
+	"github.com/evcc-io/evcc/util/request"
 	"github.com/jinzhu/now"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,6 +62,40 @@ func TestMergeRatesAfter(t *testing.T) {
 		res, err := data.Get()
 		require.NoError(t, err)
 		assert.Equal(t, tc.expected, res)
+	}
+}
+
+func TestBackoffPermanentError(t *testing.T) {
+	// the request helpers wrap every non-2xx status in backoff.Permanent
+	statusError := func(code int) error {
+		req, _ := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		return backoff.Permanent(request.NewStatusError(&http.Response{StatusCode: code, Request: req}))
+	}
+
+	permanent := func(err error) bool {
+		_, ok := errors.AsType[*backoff.PermanentError](err)
+		return ok
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"bad request", statusError(http.StatusBadRequest), true},
+		{"unauthorized", statusError(http.StatusUnauthorized), true},
+		{"forbidden", statusError(http.StatusForbidden), true},
+		{"quota", statusError(http.StatusTooManyRequests), true},
+		{"jq", errors.New("jq: query failed: expected an object"), true},
+		// backend up, resource not published (yet)
+		{"not found", statusError(http.StatusNotFound), false},
+		{"request timeout", statusError(http.StatusRequestTimeout), false},
+		{"bad gateway", statusError(http.StatusBadGateway), false},
+		{"unavailable", statusError(http.StatusServiceUnavailable), false},
+		{"gateway timeout", statusError(http.StatusGatewayTimeout), false},
+		{"network", errors.New("dial tcp: connect: connection refused"), false},
+	} {
+		assert.Equal(t, tc.want, permanent(backoffPermanentError(tc.err)), tc.name)
 	}
 }
 
